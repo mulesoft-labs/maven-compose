@@ -26,10 +26,16 @@ import org.codehaus.plexus.component.annotations.Requirement;
 import org.codehaus.plexus.component.repository.exception.ComponentLookupException;
 import org.codehaus.plexus.logging.Logger;
 
+/**
+ * {@link ModelBuilder} which takes artifacts described in properties that
+ * follow a certain convention and merges them into the project's model,
+ * emulating "multiple inheritance".
+ *
+ */
 @Component(role = ModelBuilder.class, hint = "default")
 public class CompositeModelBuilder implements ModelBuilder {
 
-	private static final String PROPERTY_PREFIX = "maven.compose.";
+	private static final String PROPERTY_PREFIX = "maven-compose.";
 
 	@Requirement
 	private Logger logger;

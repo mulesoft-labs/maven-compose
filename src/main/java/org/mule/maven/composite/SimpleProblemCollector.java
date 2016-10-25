@@ -3,12 +3,14 @@ package org.mule.maven.composite;
 import java.util.ArrayList;
 import java.util.List;
 
-import org.apache.maven.model.Model;
 import org.apache.maven.model.building.ModelProblemCollector;
 import org.apache.maven.model.building.ModelProblemCollectorRequest;
 
-class SimpleProblemCollector implements ModelProblemCollector {
-	private Model model;
+/**
+ * Copied from {@link org.apache.maven.model.building.SimpleProblemCollector}
+ *
+ */
+public class SimpleProblemCollector implements ModelProblemCollector {
 
 	private List<String> warnings = new ArrayList<>();
 
@@ -17,14 +19,6 @@ class SimpleProblemCollector implements ModelProblemCollector {
 	private List<String> fatals = new ArrayList<>();
 
 	public SimpleProblemCollector() {
-	}
-
-	public SimpleProblemCollector(Model model) {
-		this.model = model;
-	}
-
-	public Model getModel() {
-		return model;
 	}
 
 	public List<String> getWarnings() {
