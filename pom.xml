@@ -2,22 +2,35 @@
 	xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
 	<modelVersion>4.0.0</modelVersion>
 
-	<parent>
-		<groupId>io.takari.polyglot</groupId>
-		<artifactId>polyglot</artifactId>
-		<version>0.1.19</version>
-	</parent>
-
 	<groupId>org.mule</groupId>
-	<artifactId>maven-composite</artifactId>
+	<artifactId>maven-compose</artifactId>
 	<version>0.0.1-SNAPSHOT</version>
+
+	<properties>
+		<mavenVersion>3.3.1</mavenVersion>
+	</properties>
 
 	<dependencies>
 		<dependency>
 			<groupId>org.apache.maven</groupId>
-			<artifactId>maven-model-builder</artifactId>
+			<artifactId>maven-core</artifactId>
+			<scope>provided</scope>
 		</dependency>
 	</dependencies>
+
+	<dependencyManagement>
+		<dependencies>
+			<!-- We inline Maven's dependency management section to align dependency 
+				versions from Maven's core -->
+			<dependency>
+				<groupId>org.apache.maven</groupId>
+				<artifactId>maven</artifactId>
+				<version>${mavenVersion}</version>
+				<type>pom</type>
+				<scope>import</scope>
+			</dependency>
+		</dependencies>
+	</dependencyManagement>
 
 	<build>
 		<plugins>
@@ -29,7 +42,20 @@
 					<target>1.8</target>
 				</configuration>
 			</plugin>
+			<plugin>
+				<groupId>org.codehaus.plexus</groupId>
+				<artifactId>plexus-component-metadata</artifactId>
+				<executions>
+					<execution>
+						<goals>
+							<goal>generate-metadata</goal>
+							<goal>generate-test-metadata</goal>
+						</goals>
+					</execution>
+				</executions>
+			</plugin>
 		</plugins>
+
 		<pluginManagement>
 			<plugins>
 				<plugin>
