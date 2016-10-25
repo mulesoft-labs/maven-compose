@@ -1,8 +1,10 @@
 package org.mule.maven.composite;
 
 import java.io.File;
-import java.util.LinkedList;
+import java.io.FileInputStream;
+import java.io.IOException;
 import java.util.List;
+import java.util.Optional;
 
 import org.apache.maven.artifact.Artifact;
 import org.apache.maven.artifact.DefaultArtifact;
@@ -19,6 +21,7 @@ import org.apache.maven.model.building.ModelBuildingRequest;
 import org.apache.maven.model.building.ModelBuildingResult;
 import org.apache.maven.model.building.Result;
 import org.apache.maven.model.inheritance.InheritanceAssembler;
+import org.apache.maven.model.io.xpp3.MavenXpp3Reader;
 import org.apache.maven.model.locator.ModelLocator;
 import org.apache.maven.repository.RepositorySystem;
 import org.codehaus.plexus.PlexusContainer;
@@ -26,6 +29,7 @@ import org.codehaus.plexus.component.annotations.Component;
 import org.codehaus.plexus.component.annotations.Requirement;
 import org.codehaus.plexus.component.repository.exception.ComponentLookupException;
 import org.codehaus.plexus.logging.Logger;
+import org.codehaus.plexus.util.xml.pull.XmlPullParserException;
 
 /**
  * {@link ModelBuilder} which takes artifacts described in properties that
@@ -173,25 +177,40 @@ public class CompositeModelBuilder implements ModelBuilder {
 		if (coordinates.length < 3) {
 			throw new IllegalArgumentException("Invalid dependency: " + dependency);
 		} else {
-			groupId = coordinates[0];
-			artifactId = coordinates[1];
-			version = coordinates[2];
+			groupId = coordinates[0].trim();
+			artifactId = coordinates[1].trim();
+			version = coordinates[2].trim();
 			if (coordinates.length > 3) {
-				type = coordinates[3];
+				type = coordinates[3].trim();
 			}
 			if (coordinates.length > 4) {
-				classifier = coordinates[4];
+				classifier = coordinates[4].trim();
 			}
 		}
 		Artifact artifact = new DefaultArtifact(groupId, artifactId, version, scope, type, classifier, new DefaultArtifactHandler(type));
 		if (coordsLocation.length > 1) {
-			String relativePath = coordsLocation[1];
+			String relativePath = coordsLocation[1].trim();
 			File location = new File(baseDir, relativePath);
 			if (location.isDirectory()) {
 				location = modelLocator.locatePom(location);
+				validateLocation(artifact, location);
 			}
 			artifact.setFile(location);
 		}
 		return artifact;
+	}
+
+	private void validateLocation(Artifact artifact, File location) {
+		try {
+			Model readModel = new MavenXpp3Reader().read(new FileInputStream(location));
+			String groupId = Optional.ofNullable(readModel.getGroupId()).orElse(readModel.getParent().getGroupId());
+			String artifactId = readModel.getArtifactId();
+			String version = Optional.ofNullable(readModel.getVersion()).orElse(readModel.getParent().getVersion());
+			if (!groupId.equals(artifact.getGroupId()) || !artifactId.equals(artifact.getArtifactId()) || !version.equals(artifact.getVersion())) {
+				throw new IllegalArgumentException("Declared artifact " + artifact + " does not match pom file located at " + location);
+			}
+		} catch (IOException | XmlPullParserException e) {
+			throw new RuntimeException(e);
+		}
 	}
 }
