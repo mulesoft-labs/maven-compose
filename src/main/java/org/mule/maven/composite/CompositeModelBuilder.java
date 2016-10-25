@@ -19,6 +19,7 @@ import org.apache.maven.model.building.ModelBuildingRequest;
 import org.apache.maven.model.building.ModelBuildingResult;
 import org.apache.maven.model.building.Result;
 import org.apache.maven.model.inheritance.InheritanceAssembler;
+import org.apache.maven.model.locator.ModelLocator;
 import org.apache.maven.repository.RepositorySystem;
 import org.codehaus.plexus.PlexusContainer;
 import org.codehaus.plexus.component.annotations.Component;
@@ -42,6 +43,9 @@ public class CompositeModelBuilder implements ModelBuilder {
 
 	@Requirement
 	private PlexusContainer plexus;
+
+	@Requirement
+	private ModelLocator modelLocator;
 
 	@Requirement
 	private InheritanceAssembler assembler;
@@ -88,46 +92,56 @@ public class CompositeModelBuilder implements ModelBuilder {
 		return decoratedModelBuilder;
 	}
 
-	private Model compose(Model model, ModelBuildingRequest request) {
+	private Model compose(Model model, ModelBuildingRequest originalRequest) {
+		File baseDir = getBaseDir(originalRequest);
+
 		model.getProperties().entrySet().stream() //
 				.filter(entry -> ((String) entry.getKey()).startsWith(PROPERTY_PREFIX)) //
-				.map(entry -> getArtifact((String) entry.getValue())) //
-				.forEach(artifact -> mergeModel(artifact, model, request));
+				.map(entry -> getArtifact((String) entry.getValue(), baseDir)) //
+				.forEach(artifact -> mergeModel(artifact, model, originalRequest));
 		return model;
 	}
 
-	private void mergeModel(Artifact artifact, Model model, ModelBuildingRequest buildRequest) {
+	private File getBaseDir(ModelBuildingRequest request) {
+		String location = request.getModelSource().getLocation();
+		File pomFile = new File(location);
+		return pomFile.getParentFile();
+	}
+
+	private void mergeModel(Artifact artifact, Model model, ModelBuildingRequest originalRequest) {
 		logger.debug("Resolving composite artifact: " + artifact);
+		File artifactFile = artifact.getFile();
+		if (artifactFile == null) {
+			artifactFile = resolve(artifact);
+		}
+		Model builtModel = doBuild(originalRequest, artifactFile);
+		assembleModel(model, builtModel);
+	}
+
+	private File resolve(Artifact artifact) {
 		ArtifactResolutionRequest request = getRequest(artifact);
 		ArtifactResolutionResult result = repositorySystem.resolve(request);
+
+		File resolvedFile = null;
 		if (result.isSuccess()) {
-			result.getArtifacts().stream() //
-					.map(art -> getRequest(art.getFile(), buildRequest)) //
-					.map(this::doBuild) //
-					.forEach(builtModel -> assembleModel(model, builtModel));
+			resolvedFile = result.getArtifacts().iterator().next().getFile();
 		} else {
-			rethrowErrors(request, result);
+			try {
+				resolutionErrorHandler.throwErrors(request, result);
+			} catch (ArtifactResolutionException e) {
+				throw new RuntimeException(e);
+			}
 		}
+		return resolvedFile;
 	}
 
-	private void rethrowErrors(ArtifactResolutionRequest request, ArtifactResolutionResult result) {
-		try {
-			resolutionErrorHandler.throwErrors(request, result);
-		} catch (ArtifactResolutionException e) {
-			throw new RuntimeException(e);
-		}
-	}
-
-	private Model doBuild(ModelBuildingRequest request) {
+	private Model doBuild(ModelBuildingRequest originalRequest, File pomFile) {
+		ModelBuildingRequest request = new DefaultModelBuildingRequest(originalRequest).setModelSource(null).setPomFile(pomFile);
 		try {
 			return build(request).getEffectiveModel();
 		} catch (ModelBuildingException e) {
 			throw new RuntimeException(e);
 		}
-	}
-
-	private ModelBuildingRequest getRequest(File pomFile, ModelBuildingRequest request) {
-		return new DefaultModelBuildingRequest(request).setModelSource(null).setPomFile(pomFile);
 	}
 
 	private void assembleModel(Model model, Model builtModel) {
@@ -136,19 +150,9 @@ public class CompositeModelBuilder implements ModelBuilder {
 		SimpleProblemCollector problems = new SimpleProblemCollector();
 		assembler.assembleModelInheritance(model, builtModel, null, problems);
 
-		problems.getWarnings().forEach(warning -> logger.warn(warning));
-
-		List<String> allProblems = new LinkedList<>(problems.getErrors());
-		allProblems.addAll(problems.getFatals());
-		if (!allProblems.isEmpty()) {
-			String errors = allProblems.stream().reduce("", (a, b) -> a + System.lineSeparator() + b);
-			String message = "There were problems assembling the inheritance model for composite artifact " + getGav(builtModel) + ". Errors: " + errors;
-			throw new RuntimeException(message);
+		if (!problems.isOk()) {
+			problems.report(builtModel, logger);
 		}
-	}
-
-	private String getGav(Model readModel) {
-		return readModel.getGroupId() + readModel.getArtifactId() + readModel.getVersion();
 	}
 
 	private ArtifactResolutionRequest getRequest(Artifact artifact) {
@@ -157,14 +161,15 @@ public class CompositeModelBuilder implements ModelBuilder {
 		return request;
 	}
 
-	private DefaultArtifact getArtifact(String dependency) {
+	private Artifact getArtifact(String dependency, File baseDir) {
 		String groupId;
 		String artifactId;
 		String version;
 		String type = "pom";
 		String scope = "compile";
 		String classifier = "";
-		String[] coordinates = dependency.split(":");
+		String[] coordsLocation = dependency.split("@");
+		String[] coordinates = coordsLocation[0].split(":");
 		if (coordinates.length < 3) {
 			throw new IllegalArgumentException("Invalid dependency: " + dependency);
 		} else {
@@ -178,6 +183,15 @@ public class CompositeModelBuilder implements ModelBuilder {
 				classifier = coordinates[4];
 			}
 		}
-		return new DefaultArtifact(groupId, artifactId, version, scope, type, classifier, new DefaultArtifactHandler(type));
+		Artifact artifact = new DefaultArtifact(groupId, artifactId, version, scope, type, classifier, new DefaultArtifactHandler(type));
+		if (coordsLocation.length > 1) {
+			String relativePath = coordsLocation[1];
+			File location = new File(baseDir, relativePath);
+			if (location.isDirectory()) {
+				location = modelLocator.locatePom(location);
+			}
+			artifact.setFile(location);
+		}
+		return artifact;
 	}
 }
