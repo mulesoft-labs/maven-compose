@@ -1,9 +1,11 @@
 package org.mule.maven.composite;
 
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import org.apache.maven.artifact.Artifact;
@@ -19,17 +21,15 @@ import org.apache.maven.model.building.ModelBuilder;
 import org.apache.maven.model.building.ModelBuildingException;
 import org.apache.maven.model.building.ModelBuildingRequest;
 import org.apache.maven.model.building.ModelBuildingResult;
+import org.apache.maven.model.building.ModelProcessor;
 import org.apache.maven.model.building.Result;
 import org.apache.maven.model.inheritance.InheritanceAssembler;
-import org.apache.maven.model.io.xpp3.MavenXpp3Reader;
-import org.apache.maven.model.locator.ModelLocator;
 import org.apache.maven.repository.RepositorySystem;
 import org.codehaus.plexus.PlexusContainer;
 import org.codehaus.plexus.component.annotations.Component;
 import org.codehaus.plexus.component.annotations.Requirement;
 import org.codehaus.plexus.component.repository.exception.ComponentLookupException;
 import org.codehaus.plexus.logging.Logger;
-import org.codehaus.plexus.util.xml.pull.XmlPullParserException;
 
 /**
  * {@link ModelBuilder} which takes artifacts described in properties that
@@ -49,31 +49,33 @@ public class CompositeModelBuilder implements ModelBuilder {
 	private PlexusContainer plexus;
 
 	@Requirement
-	private ModelLocator modelLocator;
-
-	@Requirement
-	private InheritanceAssembler assembler;
+	private ModelProcessor modelProcessor;
 
 	@Requirement
 	private RepositorySystem repositorySystem;
+
+	@Requirement
+	private InheritanceAssembler inheritanceAssembler;
 
 	@Requirement
 	private ResolutionErrorHandler resolutionErrorHandler;
 
 	private ModelBuilder decoratedModelBuilder;
 
+	private Map<String, Model> resolvedComposites = new HashMap<>();
+
 	@Override
 	public ModelBuildingResult build(ModelBuildingRequest request) throws ModelBuildingException {
 		ModelBuildingResult result = getModelBuilder().build(request);
 		Model effectiveModel = result.getEffectiveModel();
-		return DefaultModelBuildingResult.from(result, compose(effectiveModel, request));
+		return DefaultModelBuildingResult.from(result, applyComposites(effectiveModel, request));
 	}
 
 	@Override
 	public ModelBuildingResult build(ModelBuildingRequest request, ModelBuildingResult result) throws ModelBuildingException {
 		ModelBuildingResult newResult = getModelBuilder().build(request, result);
 		Model effectiveModel = newResult.getEffectiveModel();
-		return DefaultModelBuildingResult.from(result, compose(effectiveModel, request));
+		return DefaultModelBuildingResult.from(result, applyComposites(effectiveModel, request));
 	}
 
 	@Override
@@ -96,7 +98,7 @@ public class CompositeModelBuilder implements ModelBuilder {
 		return decoratedModelBuilder;
 	}
 
-	private Model compose(Model model, ModelBuildingRequest originalRequest) {
+	private Model applyComposites(Model model, ModelBuildingRequest originalRequest) {
 		File baseDir = getBaseDir(originalRequest);
 
 		model.getProperties().entrySet().stream() //
@@ -113,13 +115,20 @@ public class CompositeModelBuilder implements ModelBuilder {
 	}
 
 	private void mergeModel(Artifact artifact, Model model, ModelBuildingRequest originalRequest) {
-		logger.debug("Resolving composite artifact: " + artifact);
-		File artifactFile = artifact.getFile();
-		if (artifactFile == null) {
-			artifactFile = resolve(artifact);
+		String artifactKey = getKey(artifact);
+		if (!resolvedComposites.containsKey(artifactKey)) {
+			logger.debug("Resolving composite artifact " + artifactKey);
+			File artifactFile = artifact.getFile();
+			if (artifactFile == null) {
+				artifactFile = resolve(artifact);
+			}
+			Model builtModel = doBuild(originalRequest, artifactFile);
+			resolvedComposites.put(artifactKey, builtModel);
+		} else {
+			logger.debug("Reusing already resolved Model for composite artifact " + artifactKey);
 		}
-		Model builtModel = doBuild(originalRequest, artifactFile);
-		assembleModel(model, builtModel);
+		Model compositeModel = resolvedComposites.get(artifactKey);
+		assembleModel(model, compositeModel);
 	}
 
 	private File resolve(Artifact artifact) {
@@ -152,7 +161,7 @@ public class CompositeModelBuilder implements ModelBuilder {
 		logger.debug("Assembling inheritance from artifact " + builtModel + " onto " + model);
 
 		SimpleProblemCollector problems = new SimpleProblemCollector();
-		assembler.assembleModelInheritance(model, builtModel, null, problems);
+		inheritanceAssembler.assembleModelInheritance(model, builtModel, null, problems);
 
 		if (!problems.isOk()) {
 			problems.report(builtModel, logger);
@@ -192,7 +201,7 @@ public class CompositeModelBuilder implements ModelBuilder {
 			String relativePath = coordsLocation[1].trim();
 			File location = new File(baseDir, relativePath);
 			if (location.isDirectory()) {
-				location = modelLocator.locatePom(location);
+				location = modelProcessor.locatePom(location);
 				validateLocation(artifact, location);
 			}
 			artifact.setFile(location);
@@ -202,15 +211,21 @@ public class CompositeModelBuilder implements ModelBuilder {
 
 	private void validateLocation(Artifact artifact, File location) {
 		try {
-			Model readModel = new MavenXpp3Reader().read(new FileInputStream(location));
-			String groupId = Optional.ofNullable(readModel.getGroupId()).orElse(readModel.getParent().getGroupId());
+			Model readModel = modelProcessor.read(location, Collections.emptyMap());
+			logger.debug("Read model from location: " + location + " result was: " + readModel);
+			String groupId = Optional.ofNullable(readModel.getGroupId()).orElseGet(() -> readModel.getParent().getGroupId());
 			String artifactId = readModel.getArtifactId();
-			String version = Optional.ofNullable(readModel.getVersion()).orElse(readModel.getParent().getVersion());
+			String version = Optional.ofNullable(readModel.getVersion()).orElseGet(() -> readModel.getParent().getVersion());
 			if (!groupId.equals(artifact.getGroupId()) || !artifactId.equals(artifact.getArtifactId()) || !version.equals(artifact.getVersion())) {
 				throw new IllegalArgumentException("Declared artifact " + artifact + " does not match pom file located at " + location);
 			}
-		} catch (IOException | XmlPullParserException e) {
+		} catch (IOException e) {
 			throw new RuntimeException(e);
 		}
+	}
+
+	private String getKey(Artifact artifact) {
+		return artifact.getGroupId() + ":" + artifact.getArtifactId() + ":" + artifact.getVersion() + ":" + artifact.getScope() + ":" + artifact.getType() + ":"
+				+ artifact.getClassifier();
 	}
 }
