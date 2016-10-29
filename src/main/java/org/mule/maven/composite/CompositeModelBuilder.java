@@ -4,9 +4,12 @@ import java.io.File;
 import java.io.IOException;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 import org.apache.maven.artifact.Artifact;
 import org.apache.maven.artifact.DefaultArtifact;
@@ -16,6 +19,7 @@ import org.apache.maven.artifact.resolver.ArtifactResolutionRequest;
 import org.apache.maven.artifact.resolver.ArtifactResolutionResult;
 import org.apache.maven.artifact.resolver.ResolutionErrorHandler;
 import org.apache.maven.model.Model;
+import org.apache.maven.model.Parent;
 import org.apache.maven.model.building.DefaultModelBuildingRequest;
 import org.apache.maven.model.building.ModelBuilder;
 import org.apache.maven.model.building.ModelBuildingException;
@@ -23,7 +27,6 @@ import org.apache.maven.model.building.ModelBuildingRequest;
 import org.apache.maven.model.building.ModelBuildingResult;
 import org.apache.maven.model.building.ModelProcessor;
 import org.apache.maven.model.building.Result;
-import org.apache.maven.model.inheritance.InheritanceAssembler;
 import org.apache.maven.repository.RepositorySystem;
 import org.codehaus.plexus.PlexusContainer;
 import org.codehaus.plexus.component.annotations.Component;
@@ -43,7 +46,7 @@ public class CompositeModelBuilder implements ModelBuilder {
 	private static final String PROPERTY_PREFIX = "maven-compose.";
 
 	@Requirement
-	private Logger logger;
+	Logger logger;
 
 	@Requirement
 	private PlexusContainer plexus;
@@ -55,27 +58,26 @@ public class CompositeModelBuilder implements ModelBuilder {
 	private RepositorySystem repositorySystem;
 
 	@Requirement
-	private InheritanceAssembler inheritanceAssembler;
-
-	@Requirement
 	private ResolutionErrorHandler resolutionErrorHandler;
 
 	private ModelBuilder decoratedModelBuilder;
 
 	private Map<String, Model> resolvedComposites = new HashMap<>();
 
+	private Map<String, Set<String>> assembledComposites = new HashMap<>();
+
 	@Override
 	public ModelBuildingResult build(ModelBuildingRequest request) throws ModelBuildingException {
 		ModelBuildingResult result = getModelBuilder().build(request);
 		Model effectiveModel = result.getEffectiveModel();
-		return DefaultModelBuildingResult.from(result, applyComposites(effectiveModel, request));
+		return DefaultModelBuildingResult.from(result, assembleComposites(effectiveModel, request));
 	}
 
 	@Override
 	public ModelBuildingResult build(ModelBuildingRequest request, ModelBuildingResult result) throws ModelBuildingException {
 		ModelBuildingResult newResult = getModelBuilder().build(request, result);
 		Model effectiveModel = newResult.getEffectiveModel();
-		return DefaultModelBuildingResult.from(result, applyComposites(effectiveModel, request));
+		return DefaultModelBuildingResult.from(result, assembleComposites(effectiveModel, request));
 	}
 
 	@Override
@@ -83,28 +85,17 @@ public class CompositeModelBuilder implements ModelBuilder {
 		return getModelBuilder().buildRawModel(pomFile, validationLevel, locationTracking);
 	}
 
-	private ModelBuilder getModelBuilder() {
-		if (decoratedModelBuilder == null) {
-			try {
-				List<Object> components = plexus.lookupList(ModelBuilder.class.getName());
-				logger.debug(ModelBuilder.class.getName() + " available components: " + components);
-				decoratedModelBuilder = (ModelBuilder) components.stream().filter(x -> x != this).findFirst()
-						.orElseThrow(() -> new IllegalStateException("There should be another implementation of ModelBuilder"));
-				logger.debug("Using " + ModelBuilder.class.getName() + " implementation as default: " + decoratedModelBuilder);
-			} catch (ComponentLookupException e) {
-				throw new RuntimeException("Error retrieving default ModelBuilder component", e);
-			}
-		}
-		return decoratedModelBuilder;
-	}
-
-	private Model applyComposites(Model model, ModelBuildingRequest originalRequest) {
+	private Model assembleComposites(Model model, ModelBuildingRequest originalRequest) throws ModelBuildingException {
 		File baseDir = getBaseDir(originalRequest);
 
-		model.getProperties().entrySet().stream() //
+		List<Artifact> artifactsToMerge = model.getProperties().entrySet().stream() //
 				.filter(entry -> ((String) entry.getKey()).startsWith(PROPERTY_PREFIX)) //
 				.map(entry -> getArtifact((String) entry.getValue(), baseDir)) //
-				.forEach(artifact -> mergeModel(artifact, model, originalRequest));
+				.collect(Collectors.toList());
+
+		for (Artifact artifact : artifactsToMerge) {
+			model = mergeModel(artifact, model, originalRequest);
+		}
 		return model;
 	}
 
@@ -114,7 +105,7 @@ public class CompositeModelBuilder implements ModelBuilder {
 		return pomFile.getParentFile();
 	}
 
-	private void mergeModel(Artifact artifact, Model model, ModelBuildingRequest originalRequest) {
+	private Model mergeModel(Artifact artifact, Model model, ModelBuildingRequest originalRequest) throws ModelBuildingException {
 		String artifactKey = getKey(artifact);
 		if (!resolvedComposites.containsKey(artifactKey)) {
 			logger.debug("Resolving composite artifact " + artifactKey);
@@ -122,17 +113,55 @@ public class CompositeModelBuilder implements ModelBuilder {
 			if (artifactFile == null) {
 				artifactFile = resolve(artifact);
 			}
-			Model builtModel = doBuild(originalRequest, artifactFile);
-			resolvedComposites.put(artifactKey, builtModel);
+			resolvedComposites.put(artifactKey, doBuild(originalRequest, artifactFile));
 		} else {
 			logger.debug("Reusing already resolved Model for composite artifact " + artifactKey);
 		}
 		Model compositeModel = resolvedComposites.get(artifactKey);
-		assembleModel(model, compositeModel);
+
+		if (!wasCompositeAssembled(model, artifactKey)) {
+			addAssembledComposite(model, artifactKey);
+			return assembleModel(model, compositeModel, artifact, originalRequest);
+		} else {
+			return model;
+		}
+	}
+
+	private Model assembleModel(Model baseModel, Model compositeModel, Artifact artifact, ModelBuildingRequest originalRequest) throws ModelBuildingException {
+		logger.debug("Assembling inheritance from artifact " + compositeModel + " onto " + baseModel);
+
+		File baseModelLocation = new File(originalRequest.getModelSource().getLocation()).getParentFile();
+		Parent parent = createParentFrom(artifact, baseModelLocation);
+		return buildReplacingParent(baseModel, parent, originalRequest);
+	}
+
+	private Model buildReplacingParent(Model model, Parent parent, ModelBuildingRequest originalRequest) throws ModelBuildingException {
+		DefaultModelBuildingRequest request = new DefaultModelBuildingRequest(originalRequest);
+
+		Model modelWithNewParent = model.clone();
+		modelWithNewParent.setParent(parent);
+		request.setRawModel(modelWithNewParent);
+		Model newEffectiveModel = build(request).getEffectiveModel();
+
+		// restore original parent
+		Parent originalParent = model.getParent() != null ? model.getParent().clone() : null;
+		newEffectiveModel.setParent(originalParent);
+
+		return newEffectiveModel;
+	}
+
+	private Parent createParentFrom(Artifact artifact, File baseModelLocation) {
+		Parent parent = new Parent();
+		parent.setGroupId(artifact.getGroupId());
+		parent.setArtifactId(artifact.getArtifactId());
+		parent.setVersion(artifact.getVersion());
+		parent.setRelativePath(Utils.relativize(artifact.getFile().getAbsolutePath(), baseModelLocation.getAbsolutePath()));
+		logger.debug("Relative path from " + artifact.getFile().getAbsolutePath() + " to " + baseModelLocation.getAbsolutePath() + " = " + parent.getRelativePath());
+		return parent;
 	}
 
 	private File resolve(Artifact artifact) {
-		ArtifactResolutionRequest request = getRequest(artifact);
+		ArtifactResolutionRequest request = new ArtifactResolutionRequest().setArtifact(artifact);
 		ArtifactResolutionResult result = repositorySystem.resolve(request);
 
 		File resolvedFile = null;
@@ -151,27 +180,10 @@ public class CompositeModelBuilder implements ModelBuilder {
 	private Model doBuild(ModelBuildingRequest originalRequest, File pomFile) {
 		ModelBuildingRequest request = new DefaultModelBuildingRequest(originalRequest).setModelSource(null).setPomFile(pomFile);
 		try {
-			return build(request).getEffectiveModel();
+			return build(request).getRawModel();
 		} catch (ModelBuildingException e) {
 			throw new RuntimeException(e);
 		}
-	}
-
-	private void assembleModel(Model model, Model builtModel) {
-		logger.debug("Assembling inheritance from artifact " + builtModel + " onto " + model);
-
-		SimpleProblemCollector problems = new SimpleProblemCollector();
-		inheritanceAssembler.assembleModelInheritance(model, builtModel, null, problems);
-
-		if (!problems.isOk()) {
-			problems.report(builtModel, logger);
-		}
-	}
-
-	private ArtifactResolutionRequest getRequest(Artifact artifact) {
-		ArtifactResolutionRequest request = new ArtifactResolutionRequest();
-		request.setArtifact(artifact);
-		return request;
 	}
 
 	private Artifact getArtifact(String dependency, File baseDir) {
@@ -224,8 +236,42 @@ public class CompositeModelBuilder implements ModelBuilder {
 		}
 	}
 
+	private ModelBuilder getModelBuilder() {
+		if (decoratedModelBuilder == null) {
+			try {
+				String typeName = ModelBuilder.class.getName();
+				List<Object> components = plexus.lookupList(typeName);
+				logger.debug(typeName + " available components: " + components);
+				ModelBuilder component = (ModelBuilder) components.stream() //
+						.filter(x -> x != this).findFirst() //
+						.orElseThrow(() -> new IllegalStateException("There should be another implementation of " + typeName));
+				logger.debug("Using " + typeName + " implementation as default: " + component);
+				decoratedModelBuilder = component;
+			} catch (ComponentLookupException e) {
+				throw new RuntimeException("Error retrieving default ModelBuilder component", e);
+			}
+		}
+		return decoratedModelBuilder;
+	}
+
+	private void addAssembledComposite(Model model, String artifactKey) {
+		String key = getKey(model);
+		if (!assembledComposites.containsKey(key)) {
+			assembledComposites.put(key, new HashSet<>());
+		}
+		assembledComposites.get(key).add(artifactKey);
+	}
+
+	private boolean wasCompositeAssembled(Model model, String artifactKey) {
+		return assembledComposites.containsKey(getKey(model)) ? assembledComposites.get(getKey(model)).contains(artifactKey) : false;
+	}
+
 	private String getKey(Artifact artifact) {
 		return artifact.getGroupId() + ":" + artifact.getArtifactId() + ":" + artifact.getVersion() + ":" + artifact.getScope() + ":" + artifact.getType() + ":"
 				+ artifact.getClassifier();
+	}
+
+	private String getKey(Model artifact) {
+		return artifact.getGroupId() + ":" + artifact.getArtifactId() + ":" + artifact.getVersion();
 	}
 }
