@@ -46,7 +46,7 @@ public class CompositeModelBuilder implements ModelBuilder {
 	private static final String PROPERTY_PREFIX = "maven-compose.";
 
 	@Requirement
-	Logger logger;
+	private Logger logger;
 
 	@Requirement
 	private PlexusContainer plexus;
@@ -61,6 +61,14 @@ public class CompositeModelBuilder implements ModelBuilder {
 	private ResolutionErrorHandler resolutionErrorHandler;
 
 	private ModelBuilder decoratedModelBuilder;
+
+	/*
+	 * set of structures to hold previously resolved artifacts/models (to avoid
+	 * relative path issues in multi module projects) and to avoid resolving
+	 * twice the same extension
+	 */
+
+	private Map<String, Artifact> artifacts = new HashMap<>();
 
 	private Map<String, Model> resolvedComposites = new HashMap<>();
 
@@ -187,38 +195,36 @@ public class CompositeModelBuilder implements ModelBuilder {
 	}
 
 	private Artifact getArtifact(String dependency, File baseDir) {
-		String groupId;
-		String artifactId;
-		String version;
-		String type = "pom";
-		String scope = "compile";
-		String classifier = "";
 		String[] coordsLocation = dependency.split("@");
-		String[] coordinates = coordsLocation[0].split(":");
-		if (coordinates.length < 3) {
-			throw new IllegalArgumentException("Invalid dependency: " + dependency);
-		} else {
-			groupId = coordinates[0].trim();
-			artifactId = coordinates[1].trim();
-			version = coordinates[2].trim();
-			if (coordinates.length > 3) {
-				type = coordinates[3].trim();
+		if (!artifacts.containsKey(coordsLocation[0])) {
+			String groupId, artifactId, version, type = "pom", scope = "compile", classifier = "";
+			String[] coordinates = coordsLocation[0].split(":");
+			if (coordinates.length < 3) {
+				throw new IllegalArgumentException("Invalid dependency: " + dependency);
+			} else {
+				groupId = coordinates[0].trim();
+				artifactId = coordinates[1].trim();
+				version = coordinates[2].trim();
+				if (coordinates.length > 3) {
+					type = coordinates[3].trim();
+				}
+				if (coordinates.length > 4) {
+					classifier = coordinates[4].trim();
+				}
 			}
-			if (coordinates.length > 4) {
-				classifier = coordinates[4].trim();
+			Artifact artifact = new DefaultArtifact(groupId, artifactId, version, scope, type, classifier, new DefaultArtifactHandler(type));
+			if (coordsLocation.length > 1) {
+				String relativePath = coordsLocation[1].trim();
+				File location = new File(baseDir, relativePath);
+				if (location.isDirectory()) {
+					location = modelProcessor.locatePom(location);
+					validateLocation(artifact, location);
+				}
+				artifact.setFile(location);
 			}
+			artifacts.put(coordsLocation[0], artifact);
 		}
-		Artifact artifact = new DefaultArtifact(groupId, artifactId, version, scope, type, classifier, new DefaultArtifactHandler(type));
-		if (coordsLocation.length > 1) {
-			String relativePath = coordsLocation[1].trim();
-			File location = new File(baseDir, relativePath);
-			if (location.isDirectory()) {
-				location = modelProcessor.locatePom(location);
-				validateLocation(artifact, location);
-			}
-			artifact.setFile(location);
-		}
-		return artifact;
+		return artifacts.get(coordsLocation[0]);
 	}
 
 	private void validateLocation(Artifact artifact, File location) {
