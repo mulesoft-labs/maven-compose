@@ -6,6 +6,16 @@
 	<artifactId>maven-compose</artifactId>
 	<version>0.0.1-SNAPSHOT</version>
 
+	<name>Maven Compose</name>
+
+	<description>Maven core extension to be able to reuse pom fragments
+		via composition instead of inheritance</description>
+
+	<organization>
+		<name>MuleSoft</name>
+		<url>https://www.mulesoft.com</url>
+	</organization>
+
 	<properties>
 		<mavenVersion>3.3.1</mavenVersion>
 	</properties>
@@ -26,7 +36,7 @@
 
 	<dependencyManagement>
 		<dependencies>
-			<!-- We inline Maven's dependency management section to align dependency 
+			<!-- We inline Maven's dependency management section to align dependency
 				versions from Maven's core -->
 			<dependency>
 				<groupId>org.apache.maven</groupId>
@@ -43,9 +53,11 @@
 			<plugin>
 				<groupId>org.apache.maven.plugins</groupId>
 				<artifactId>maven-compiler-plugin</artifactId>
+				<version>2.3.2</version>
 				<configuration>
 					<source>1.8</source>
 					<target>1.8</target>
+					<encoding>UTF-8</encoding>
 				</configuration>
 			</plugin>
 			<plugin>
@@ -72,5 +84,19 @@
 			</plugins>
 		</pluginManagement>
 	</build>
+
+	<distributionManagement>
+		<repository>
+			<id>mulesoft-releases</id>
+			<name>MuleSoft Repository</name>
+			<url>https://repository-master.mulesoft.org/releases</url>
+		</repository>
+		<snapshotRepository>
+			<id>mulesoft-snapshots</id>
+			<name>MuleSoft Snapshot Repository</name>
+			<url>https://repository-master.mulesoft.org/snapshots</url>
+			<uniqueVersion>false</uniqueVersion>
+		</snapshotRepository>
+	</distributionManagement>
 
 </project>
